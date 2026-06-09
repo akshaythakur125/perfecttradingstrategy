@@ -24,6 +24,10 @@ dist/
 *.swp
 *.swo
 
+# Generated
+audit_results.json
+coverage.xml
+
 # OS
 .DS_Store
 Thumbs.db

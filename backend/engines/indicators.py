@@ -103,6 +103,7 @@ def get_volume_signal(volume: np.ndarray, volume_ma: np.ndarray, volume_std: np.
 
 
 def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
     close = df["close"].values
     high = df["high"].values
     low = df["low"].values

@@ -285,8 +285,10 @@ class BacktestEngine:
 
     def _get_month_key(self, row) -> str:
         ts = row.get("timestamp", datetime.utcnow())
-        if isinstance(ts, (int, float)):
-            ts = datetime.fromtimestamp(ts / 1000)
+        if isinstance(ts, (int, float, np.integer, np.floating)):
+            ts = datetime.fromtimestamp(float(ts) / 1000)
+        elif not isinstance(ts, datetime):
+            ts = datetime.utcnow()
         return ts.strftime("%Y-%m")
 
     def _calc_pnl(self, entry: float, exit_price: float, direction: str, size: float) -> float:
@@ -333,15 +335,15 @@ class BacktestEngine:
         drawdown = (peak - equity) / peak
         max_dd = np.max(drawdown) if len(drawdown) > 0 else 0
 
-        if isinstance(start_ts, (int, float)):
-            start_dt = datetime.fromtimestamp(start_ts / 1000)
+        if isinstance(start_ts, (int, float, np.integer, np.floating)):
+            start_dt = datetime.fromtimestamp(float(start_ts) / 1000)
         else:
-            start_dt = start_ts or datetime.utcnow()
+            start_dt = start_ts if isinstance(start_ts, datetime) else datetime.utcnow()
 
-        if isinstance(end_ts, (int, float)):
-            end_dt = datetime.fromtimestamp(end_ts / 1000)
+        if isinstance(end_ts, (int, float, np.integer, np.floating)):
+            end_dt = datetime.fromtimestamp(float(end_ts) / 1000)
         else:
-            end_dt = end_ts or datetime.utcnow()
+            end_dt = end_ts if isinstance(end_ts, datetime) else datetime.utcnow()
 
         years = max((end_dt - start_dt).days / 365.25, 1 / 365.25)
         cagr = ((final / initial) ** (1 / years) - 1) * 100 if initial > 0 else 0

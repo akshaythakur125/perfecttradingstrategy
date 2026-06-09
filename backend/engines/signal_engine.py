@@ -15,8 +15,10 @@ class SignalEngine:
     def evaluate_long_setup(self, df_4h: pd.DataFrame, df_15m: pd.DataFrame,
                             oi_change_pct: Optional[float] = None,
                             funding_rate: Optional[float] = None) -> Optional[Dict]:
-        df_4h = compute_all_indicators(df_4h)
-        df_15m = compute_all_indicators(df_15m)
+        if "rsi" not in df_4h.columns:
+            df_4h = compute_all_indicators(df_4h)
+        if "rsi" not in df_15m.columns:
+            df_15m = compute_all_indicators(df_15m)
 
         structure_4h = analyze_market_structure(df_4h)
         structure_15m = analyze_market_structure(df_15m)
@@ -111,8 +113,10 @@ class SignalEngine:
     def evaluate_short_setup(self, df_4h: pd.DataFrame, df_15m: pd.DataFrame,
                              oi_change_pct: Optional[float] = None,
                              funding_rate: Optional[float] = None) -> Optional[Dict]:
-        df_4h = compute_all_indicators(df_4h)
-        df_15m = compute_all_indicators(df_15m)
+        if "rsi" not in df_4h.columns:
+            df_4h = compute_all_indicators(df_4h)
+        if "rsi" not in df_15m.columns:
+            df_15m = compute_all_indicators(df_15m)
 
         structure_4h = analyze_market_structure(df_4h)
         structure_15m = analyze_market_structure(df_15m)
