@@ -26,6 +26,7 @@ dist/
 
 # Generated
 audit_results.json
+real_data_backtest_results.json
 coverage.xml
 
 # OS
