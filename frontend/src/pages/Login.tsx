@@ -15,9 +15,8 @@ export function Login() {
     setError('');
 
     try {
-      const fn = isRegister ? auth.register : auth.login;
       const payload = isRegister ? { username, email, password } : { username, password };
-      const res = await fn(username, password);
+      const res = isRegister ? await auth.register(username, email, password) : await auth.login(username, password);
       localStorage.setItem('token', res.data.access_token);
       navigate('/scanner');
     } catch (err: any) {

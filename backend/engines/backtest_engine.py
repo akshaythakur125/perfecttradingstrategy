@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -28,7 +28,6 @@ class BacktestEngine:
         equity_curve = [capital]
         trades = []
         monthly_pnl = {}
-        open_trade = None
         risk_mgr = RiskManager(capital)
 
         min_bars = 50
@@ -36,39 +35,6 @@ class BacktestEngine:
         max_idx_15m = len(df_15m)
 
         for i in range(min_bars, max_idx_4h):
-            if open_trade is not None:
-                exit_data = self._check_exit(
-                    df_15m, open_trade, open_trade["entry_bar_15m"]
-                )
-                if exit_data:
-                    exit_price, exit_time, holding_bars = exit_data
-                    pnl_raw = self._calc_pnl(
-                        open_trade["entry"], exit_price,
-                        open_trade["direction"], open_trade["position_size"]
-                    )
-                    fees = self._calc_fees(open_trade["entry"], open_trade["position_size"], 2)
-                    pnl = pnl_raw - fees
-
-                    capital += pnl
-                    equity_curve.append(capital)
-                    risk_mgr.account_balance = capital
-                    open_trade["pnl"] = pnl
-                    open_trade["exit_price"] = exit_price
-                    open_trade["holding_bars"] = holding_bars
-                    trades.append(open_trade)
-
-                    month_key = df_4h.iloc[i].get("timestamp", datetime.utcnow())
-                    if isinstance(month_key, (int, float)):
-                        month_key = datetime.fromtimestamp(month_key / 1000)
-                    month_str = month_key.strftime("%Y-%m")
-                    monthly_pnl[month_str] = monthly_pnl.get(month_str, 0) + pnl
-
-                    open_trade = None
-                    continue
-                else:
-                    equity_curve.append(capital)
-                    continue
-
             chunk_4h = df_4h.iloc[:i + 1]
             chunk_15m = df_15m.iloc[:i * 4 + 1] if i * 4 + 1 <= max_idx_15m else df_15m
 
@@ -76,9 +42,11 @@ class BacktestEngine:
                 equity_curve.append(capital)
                 continue
 
+            open_trade = None
+            entry_bar_15m_start = i * 4
+
             long_signal = self.signal_engine.evaluate_long_setup(chunk_4h, chunk_15m)
             short_signal = self.signal_engine.evaluate_short_setup(chunk_4h, chunk_15m)
-
             signal = long_signal or short_signal
             if not signal:
                 equity_curve.append(capital)
@@ -87,6 +55,8 @@ class BacktestEngine:
             entry = signal["entry_price"]
             sl = signal["stop_loss"]
             tp1 = signal.get("take_profit_1", entry)
+            tp2 = signal.get("take_profit_2")
+            tp3 = signal.get("take_profit_3")
             direction = signal["direction"]
 
             entry_with_slippage = entry * (1 + self.slippage_pct if direction == "LONG" else 1 - self.slippage_pct)
@@ -104,31 +74,208 @@ class BacktestEngine:
                 "entry": entry_with_slippage,
                 "stop_loss": sl_with_slippage,
                 "take_profit_1": tp1,
-                "take_profit_2": signal.get("take_profit_2"),
-                "take_profit_3": signal.get("take_profit_3"),
+                "take_profit_2": tp2,
+                "take_profit_3": tp3,
                 "direction": direction,
                 "position_size": pos_data["position_size"],
                 "dollar_risk": pos_data["dollar_risk"],
-                "entry_bar_15m": i * 4,
-                "entry_time": df_4h.iloc[i].get("timestamp", datetime.utcnow()),
+                "entry_bar_15m": entry_bar_15m_start,
+                "entry_time": chunk_4h.iloc[-1].get("timestamp", datetime.utcnow()),
                 "confidence_score": signal.get("confidence_score", 0),
+                "atr_at_entry": chunk_15m.iloc[-1]["atr"] if len(chunk_15m) > 0 else 0,
+                "remaining_size": pos_data["position_size"],
+                "partial_exits": [],
+                "breakeven_activated": False,
+                "trailing_activated": False,
+                "highest_price": entry_with_slippage,
+                "lowest_price": entry_with_slippage,
             }
 
-        if open_trade is not None:
-            last_idx = min(open_trade["entry_bar_15m"] + 96, len(df_15m) - 1)
-            last_close = df_15m.iloc[last_idx]["close"]
-            pnl_raw = self._calc_pnl(
-                open_trade["entry"], last_close,
-                open_trade["direction"], open_trade["position_size"]
-            )
-            fees = self._calc_fees(open_trade["entry"], open_trade["position_size"], 2)
-            pnl = pnl_raw - fees
-            capital += pnl
-            equity_curve.append(capital)
-            open_trade["pnl"] = pnl
-            open_trade["exit_price"] = last_close
-            open_trade["holding_bars"] = 96
-            trades.append(open_trade)
+            # Simulate this trade through 15m bars
+            for j in range(entry_bar_15m_start, min(entry_bar_15m_start + 96, max_idx_15m)):
+                if open_trade["remaining_size"] <= 0:
+                    break
+
+                bar = df_15m.iloc[j]
+                high = bar["high"]
+                low = bar["low"]
+                close = bar["close"]
+
+                if direction == "LONG":
+                    open_trade["highest_price"] = max(open_trade["highest_price"], high)
+                    if open_trade["trailing_activated"]:
+                        atr_val = bar["atr"] if "atr" in bar else open_trade.get("atr_at_entry", 0)
+                        trail_stop = open_trade["highest_price"] - (atr_val * 1.5)
+                        open_trade["stop_loss"] = max(open_trade["stop_loss"], trail_stop)
+
+                    # Check stop loss
+                    if low <= open_trade["stop_loss"]:
+                        exit_price = open_trade["stop_loss"]
+                        pnl_raw = self._calc_pnl(open_trade["entry"], exit_price, direction, open_trade["remaining_size"])
+                        fees_exit = self._calc_fees(exit_price, open_trade["remaining_size"], 1)
+                        pnl = pnl_raw - fees_exit
+                        capital += pnl
+                        equity_curve.append(capital)
+                        risk_mgr.account_balance = capital
+                        open_trade["pnl"] = pnl
+                        open_trade["exit_price"] = exit_price
+                        open_trade["holding_bars"] = j - entry_bar_15m_start
+                        open_trade["remaining_size"] = 0
+                        trades.append(open_trade)
+                        month_key = self._get_month_key(chunk_4h.iloc[i])
+                        monthly_pnl[month_key] = monthly_pnl.get(month_key, 0) + pnl
+                        break
+
+                    # Check TP1 - exit 50%
+                    if high >= open_trade["take_profit_1"]:
+                        exit_price = open_trade["take_profit_1"]
+                        exit_size = open_trade["remaining_size"] * 0.5
+                        pnl_raw = self._calc_pnl(open_trade["entry"], exit_price, direction, exit_size)
+                        fees_exit = self._calc_fees(exit_price, exit_size, 1)
+                        pnl = pnl_raw - fees_exit
+                        capital += pnl
+                        risk_mgr.account_balance = capital
+                        open_trade["partial_exits"].append({"tp": 1, "price": exit_price, "size": exit_size, "pnl": pnl})
+                        open_trade["remaining_size"] -= exit_size
+                        month_key = self._get_month_key(chunk_4h.iloc[i])
+                        monthly_pnl[month_key] = monthly_pnl.get(month_key, 0) + pnl
+
+                        if not open_trade["breakeven_activated"]:
+                            open_trade["stop_loss"] = open_trade["entry"]
+                            open_trade["breakeven_activated"] = True
+
+                        if open_trade["take_profit_2"] and high >= open_trade["take_profit_2"]:
+                            exit_size2 = open_trade["remaining_size"] * 0.6
+                            pnl_raw2 = self._calc_pnl(open_trade["entry"], open_trade["take_profit_2"], direction, exit_size2)
+                            fees_exit2 = self._calc_fees(open_trade["take_profit_2"], exit_size2, 1)
+                            pnl2 = pnl_raw2 - fees_exit2
+                            capital += pnl2
+                            risk_mgr.account_balance = capital
+                            open_trade["partial_exits"].append({"tp": 2, "price": open_trade["take_profit_2"], "size": exit_size2, "pnl": pnl2})
+                            open_trade["remaining_size"] -= exit_size2
+                            monthly_pnl[month_key] = monthly_pnl.get(month_key, 0) + pnl2
+
+                            if not open_trade["trailing_activated"]:
+                                open_trade["trailing_activated"] = True
+                                atr_val = bar["atr"] if "atr" in bar else open_trade.get("atr_at_entry", 0)
+                                open_trade["stop_loss"] = open_trade["take_profit_2"] - (atr_val * 2.0)
+
+                            if open_trade["take_profit_3"] and high >= open_trade["take_profit_3"]:
+                                exit_size3 = open_trade["remaining_size"]
+                                pnl_raw3 = self._calc_pnl(open_trade["entry"], open_trade["take_profit_3"], direction, exit_size3)
+                                fees_exit3 = self._calc_fees(open_trade["take_profit_3"], exit_size3, 1)
+                                pnl3 = pnl_raw3 - fees_exit3
+                                capital += pnl3
+                                risk_mgr.account_balance = capital
+                                open_trade["partial_exits"].append({"tp": 3, "price": open_trade["take_profit_3"], "size": exit_size3, "pnl": pnl3})
+                                open_trade["remaining_size"] = 0
+                                monthly_pnl[month_key] = monthly_pnl.get(month_key, 0) + pnl3
+                                open_trade["pnl"] = sum(e["pnl"] for e in open_trade["partial_exits"])
+                                open_trade["exit_price"] = open_trade["take_profit_3"]
+                                open_trade["holding_bars"] = j - entry_bar_15m_start
+                                trades.append(open_trade)
+                                break
+
+                        if open_trade["remaining_size"] <= 0:
+                            open_trade["pnl"] = sum(e["pnl"] for e in open_trade["partial_exits"])
+                            open_trade["exit_price"] = open_trade["take_profit_1"]
+                            open_trade["holding_bars"] = j - entry_bar_15m_start
+                            trades.append(open_trade)
+                            break
+
+                else:  # SHORT
+                    open_trade["lowest_price"] = min(open_trade["lowest_price"], low)
+                    if open_trade["trailing_activated"]:
+                        atr_val = bar["atr"] if "atr" in bar else open_trade.get("atr_at_entry", 0)
+                        trail_stop = open_trade["lowest_price"] + (atr_val * 1.5)
+                        open_trade["stop_loss"] = min(open_trade["stop_loss"], trail_stop)
+
+                    if high >= open_trade["stop_loss"]:
+                        exit_price = open_trade["stop_loss"]
+                        pnl_raw = self._calc_pnl(open_trade["entry"], exit_price, direction, open_trade["remaining_size"])
+                        fees_exit = self._calc_fees(exit_price, open_trade["remaining_size"], 1)
+                        pnl = pnl_raw - fees_exit
+                        capital += pnl
+                        equity_curve.append(capital)
+                        risk_mgr.account_balance = capital
+                        open_trade["pnl"] = pnl
+                        open_trade["exit_price"] = exit_price
+                        open_trade["holding_bars"] = j - entry_bar_15m_start
+                        open_trade["remaining_size"] = 0
+                        trades.append(open_trade)
+                        month_key = self._get_month_key(chunk_4h.iloc[i])
+                        monthly_pnl[month_key] = monthly_pnl.get(month_key, 0) + pnl
+                        break
+
+                    if low <= open_trade["take_profit_1"]:
+                        exit_price = open_trade["take_profit_1"]
+                        exit_size = open_trade["remaining_size"] * 0.5
+                        pnl_raw = self._calc_pnl(open_trade["entry"], exit_price, direction, exit_size)
+                        fees_exit = self._calc_fees(exit_price, exit_size, 1)
+                        pnl = pnl_raw - fees_exit
+                        capital += pnl
+                        risk_mgr.account_balance = capital
+                        open_trade["partial_exits"].append({"tp": 1, "price": exit_price, "size": exit_size, "pnl": pnl})
+                        open_trade["remaining_size"] -= exit_size
+                        month_key = self._get_month_key(chunk_4h.iloc[i])
+                        monthly_pnl[month_key] = monthly_pnl.get(month_key, 0) + pnl
+
+                        if not open_trade["breakeven_activated"]:
+                            open_trade["stop_loss"] = open_trade["entry"]
+                            open_trade["breakeven_activated"] = True
+
+                        if open_trade["take_profit_2"] and low <= open_trade["take_profit_2"]:
+                            exit_size2 = open_trade["remaining_size"] * 0.6
+                            pnl_raw2 = self._calc_pnl(open_trade["entry"], open_trade["take_profit_2"], direction, exit_size2)
+                            fees_exit2 = self._calc_fees(open_trade["take_profit_2"], exit_size2, 1)
+                            pnl2 = pnl_raw2 - fees_exit2
+                            capital += pnl2
+                            risk_mgr.account_balance = capital
+                            open_trade["partial_exits"].append({"tp": 2, "price": open_trade["take_profit_2"], "size": exit_size2, "pnl": pnl2})
+                            open_trade["remaining_size"] -= exit_size2
+                            monthly_pnl[month_key] = monthly_pnl.get(month_key, 0) + pnl2
+
+                            if not open_trade["trailing_activated"]:
+                                open_trade["trailing_activated"] = True
+                                atr_val = bar["atr"] if "atr" in bar else open_trade.get("atr_at_entry", 0)
+                                open_trade["stop_loss"] = open_trade["take_profit_2"] + (atr_val * 2.0)
+
+                            if open_trade["take_profit_3"] and low <= open_trade["take_profit_3"]:
+                                exit_size3 = open_trade["remaining_size"]
+                                pnl_raw3 = self._calc_pnl(open_trade["entry"], open_trade["take_profit_3"], direction, exit_size3)
+                                fees_exit3 = self._calc_fees(open_trade["take_profit_3"], exit_size3, 1)
+                                pnl3 = pnl_raw3 - fees_exit3
+                                capital += pnl3
+                                risk_mgr.account_balance = capital
+                                open_trade["partial_exits"].append({"tp": 3, "price": open_trade["take_profit_3"], "size": exit_size3, "pnl": pnl3})
+                                open_trade["remaining_size"] = 0
+                                monthly_pnl[month_key] = monthly_pnl.get(month_key, 0) + pnl3
+                                open_trade["pnl"] = sum(e["pnl"] for e in open_trade["partial_exits"])
+                                open_trade["exit_price"] = open_trade["take_profit_3"]
+                                open_trade["holding_bars"] = j - entry_bar_15m_start
+                                trades.append(open_trade)
+                                break
+
+                        if open_trade["remaining_size"] <= 0:
+                            open_trade["pnl"] = sum(e["pnl"] for e in open_trade["partial_exits"])
+                            open_trade["exit_price"] = open_trade["take_profit_1"]
+                            open_trade["holding_bars"] = j - entry_bar_15m_start
+                            trades.append(open_trade)
+                            break
+
+            if open_trade and open_trade["remaining_size"] > 0:
+                last_idx = min(entry_bar_15m_start + 96, max_idx_15m - 1)
+                last_close = df_15m.iloc[last_idx]["close"]
+                pnl_raw = self._calc_pnl(open_trade["entry"], last_close, direction, open_trade["remaining_size"])
+                fees = self._calc_fees(last_close, open_trade["remaining_size"], 1)
+                pnl = pnl_raw - fees
+                capital += pnl
+                equity_curve.append(capital)
+                open_trade["pnl"] = (open_trade.get("pnl", 0) or 0) + pnl
+                open_trade["exit_price"] = last_close
+                open_trade["holding_bars"] = 96
+                open_trade["remaining_size"] = 0
+                trades.append(open_trade)
 
         metrics = self._calculate_metrics(
             trades, initial_capital, capital, equity_curve, monthly_pnl,
@@ -136,24 +283,11 @@ class BacktestEngine:
         )
         return metrics
 
-    def _check_exit(self, df: pd.DataFrame, trade: Dict, start_idx: int) -> Optional[tuple]:
-        for i in range(start_idx, min(start_idx + 96, len(df))):
-            high = df.iloc[i]["high"]
-            low = df.iloc[i]["low"]
-
-            if trade["direction"] == "LONG":
-                if low <= trade["stop_loss"]:
-                    return trade["stop_loss"], df.iloc[i].get("timestamp"), (i - start_idx)
-                if high >= trade["take_profit_1"]:
-                    tp_exit = trade["take_profit_1"]
-                    return tp_exit, df.iloc[i].get("timestamp"), (i - start_idx)
-            else:
-                if high >= trade["stop_loss"]:
-                    return trade["stop_loss"], df.iloc[i].get("timestamp"), (i - start_idx)
-                if low <= trade["take_profit_1"]:
-                    tp_exit = trade["take_profit_1"]
-                    return tp_exit, df.iloc[i].get("timestamp"), (i - start_idx)
-        return None
+    def _get_month_key(self, row) -> str:
+        ts = row.get("timestamp", datetime.utcnow())
+        if isinstance(ts, (int, float)):
+            ts = datetime.fromtimestamp(ts / 1000)
+        return ts.strftime("%Y-%m")
 
     def _calc_pnl(self, entry: float, exit_price: float, direction: str, size: float) -> float:
         if direction == "LONG":
@@ -174,6 +308,7 @@ class BacktestEngine:
                 "average_rr": 0, "average_holding_time": 0,
                 "total_pnl": 0, "initial_capital": initial, "final_capital": initial,
                 "equity_curve": equity, "monthly_performance": monthly, "trades": trades,
+                "total_partial_exits": 0, "breakeven_trades": 0, "trailing_activated_trades": 0,
             }
 
         winning = [t for t in trades if t.get("pnl", 0) > 0]
@@ -218,6 +353,10 @@ class BacktestEngine:
 
         avg_hold = np.mean([t.get("holding_bars", 0) for t in trades]) * 15 / 60
 
+        total_partial_exits = sum(len(t.get("partial_exits", [])) for t in trades)
+        breakeven_trades = sum(1 for t in trades if t.get("breakeven_activated", False))
+        trailing_trades = sum(1 for t in trades if t.get("trailing_activated", False))
+
         return {
             "total_trades": len(trades),
             "winning_trades": len(winning),
@@ -236,4 +375,7 @@ class BacktestEngine:
             "equity_curve": [round(e, 2) for e in equity],
             "monthly_performance": {k: round(v, 2) for k, v in monthly.items()},
             "trades": trades,
+            "total_partial_exits": total_partial_exits,
+            "breakeven_trades": breakeven_trades,
+            "trailing_activated_trades": trailing_trades,
         }

@@ -23,7 +23,7 @@ export function BacktestResults() {
   const results: BacktestResult[] = history?.data || [];
   const latestRun = runMutation.data?.data;
 
-  const equityData = latestRun?.equity_curve?.map((val, i) => ({ bar: i, equity: val })) || [];
+  const equityData = latestRun?.equity_curve?.map((val: number, i: number) => ({ bar: i, equity: val })) || [];
   const monthlyData = latestRun?.monthly_performance
     ? Object.entries(latestRun.monthly_performance).map(([month, pnl]) => ({ month, pnl }))
     : [];
