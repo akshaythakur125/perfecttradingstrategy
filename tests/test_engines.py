@@ -616,6 +616,31 @@ class TestRiskManager:
         stop = rm.calculate_atr_stop(100, 2.0, "SHORT", 50000)
         assert stop == 50000 + 200
 
+    def test_drawdown_throttle_at_peak(self):
+        rm = RiskManager(account_balance=10000)
+        rm.update_balance(10000)
+        assert rm.current_drawdown() == 0
+        assert rm.get_effective_risk(0.05) == 0.05
+
+    def test_drawdown_throttle_underwater(self):
+        rm = RiskManager(account_balance=10000, dd_throttle_level=0.05, dd_throttle_factor=0.4)
+        rm.update_balance(11000)   # new peak
+        rm.update_balance(10000)   # ~9.1% below peak -> throttled
+        assert rm.current_drawdown() > 0.05
+        assert rm.get_effective_risk(0.05) == 0.05 * 0.4
+
+    def test_drawdown_throttle_disabled(self):
+        rm = RiskManager(account_balance=10000, dd_throttle_level=None)
+        rm.update_balance(20000)
+        rm.update_balance(10000)
+        assert rm.get_effective_risk(0.05) == 0.05
+
+    def test_peak_tracks_maximum(self):
+        rm = RiskManager(account_balance=10000)
+        rm.update_balance(12000)
+        rm.update_balance(11000)
+        assert rm.peak_balance == 12000
+
     def test_get_risk_metrics(self):
         rm = RiskManager(account_balance=10000)
         metrics = rm.get_risk_metrics()

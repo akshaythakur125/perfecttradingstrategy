@@ -7,10 +7,10 @@
 - **Multi-Timeframe Analysis** — Combines 4H (trend/regime) and 15M (entry) timeframes for high-probability setups
 - **Market Structure Analysis** — Swing highs/lows, Break of Structure (BOS), Change of Character (CHOCH), trend classification
 - **AOI Detection** — Supply/demand zones, order blocks, fair value gaps (FVGs), liquidity pools, equal highs/lows, wick rejections
-- **Signal Engine** — Weighted multi-factor scoring (structure 25%, AOI 25%, volume 15%, RSI 10%, OBV 10%, OI 10%, funding 5%)
-- **Backtesting Engine** — Walk-forward simulation with TP1/TP2/TP3 partial exits, break-even logic, trailing stops
-- **Risk Manager** — Position sizing, daily/weekly loss limits, ATR-based stops, R:R filtering
-- **Scanner** — Concurrent pair scanning across Binance and OKX futures
+- **Signal Engine** — Smart-money entry stack: 4H trend + regime filter → 15M pullback to EMA20 with RSI turn → FVG/order-block confluence → liquidity sweep + reclaim → BOS confirmation (each layer validated out-of-sample on real data)
+- **Backtesting Engine** — Timestamp-aligned walk-forward simulation with TP1 partial + break-even, 3R target, time stop, fees/slippage, and a drawdown throttle (de-risks while equity is underwater)
+- **Risk Manager** — Position sizing, daily/weekly loss limits, ATR-based stops, drawdown throttle, R:R filtering
+- **Scanner** — Concurrent pair scanning across Binance, OKX, and BingX perpetuals (top-N by volume)
 - **WebSocket Dashboard** — Real-time signal updates
 - **REST API** — Full CRUD for signals, trades, backtests, user settings
 - **JWT Authentication** — Secure user registration and login

@@ -15,20 +15,25 @@ class ScannerEngine:
 
     async def scan_symbol(self, symbol: str, exchange: str = "BINANCE") -> Optional[Dict]:
         try:
+            # The strategy's 4H EMA200/regime filters need a long warmup; with a
+            # short history the indicators are biased and live signals would not
+            # match backtested behavior. Fetch and require a proper window.
+            # (OKX's history endpoint caps at 100 bars/request; until pagination
+            # is added there, OKX symbols will be skipped by the length check.)
             df_4h = await self.data_collector.get_klines(
                 symbol=symbol,
                 exchange=exchange,
                 timeframe="4h",
-                limit=200,
+                limit=500,
             )
             df_15m = await self.data_collector.get_klines(
                 symbol=symbol,
                 exchange=exchange,
                 timeframe="15m",
-                limit=200,
+                limit=400,
             )
 
-            if df_4h is None or df_15m is None or len(df_4h) < 50 or len(df_15m) < 50:
+            if df_4h is None or df_15m is None or len(df_4h) < 250 or len(df_15m) < 100:
                 return None
 
             df_4h["symbol"] = symbol

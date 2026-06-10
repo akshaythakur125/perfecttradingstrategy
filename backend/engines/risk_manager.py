@@ -4,10 +4,37 @@ from config.settings import settings
 
 
 class RiskManager:
-    def __init__(self, account_balance: float = 10000.0):
+    def __init__(self, account_balance: float = 10000.0,
+                 dd_throttle_level: Optional[float] = 0.05,
+                 dd_throttle_factor: float = 0.4):
         self.account_balance = account_balance
         self.trade_history: List[Dict] = []
         self.open_positions: List[Dict] = []
+        # Drawdown throttle (mirrors the backtested "Strategy D" behavior):
+        # when equity is more than dd_throttle_level below its peak, scale the
+        # per-trade risk by dd_throttle_factor. Track the peak via
+        # update_balance() and size with get_effective_risk().
+        self.peak_balance = account_balance
+        self.dd_throttle_level = dd_throttle_level
+        self.dd_throttle_factor = dd_throttle_factor
+
+    def update_balance(self, balance: float):
+        """Record the current account balance and maintain the equity peak."""
+        self.account_balance = balance
+        self.peak_balance = max(self.peak_balance, balance)
+
+    def current_drawdown(self) -> float:
+        """Fractional drawdown from the equity peak (0 when at the peak)."""
+        if self.peak_balance <= 0:
+            return 0.0
+        return max(0.0, (self.peak_balance - self.account_balance) / self.peak_balance)
+
+    def get_effective_risk(self, base_risk: Optional[float] = None) -> float:
+        """Per-trade risk fraction after the drawdown throttle."""
+        risk = base_risk if base_risk is not None else settings.risk_per_trade
+        if self.dd_throttle_level is not None and self.current_drawdown() > self.dd_throttle_level:
+            risk *= self.dd_throttle_factor
+        return risk
 
     def calculate_position_size(self, entry: float, stop_loss: float, risk_percent: float = None) -> Dict:
         risk_pct = risk_percent or settings.risk_per_trade
