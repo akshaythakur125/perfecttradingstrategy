@@ -246,11 +246,17 @@ class BingXClient(BaseExchangeClient):
             return data.get("data", data)
         return data
 
-    async def get_klines(self, symbol: str, interval: str, limit: int = 200) -> Optional[pd.DataFrame]:
+    async def get_klines(self, symbol: str, interval: str, limit: int = 200,
+                         start_time: Optional[int] = None,
+                         end_time: Optional[int] = None) -> Optional[pd.DataFrame]:
         if interval not in self.VALID_INTERVALS:
             return None
         url = f"{self.BASE_URL}/openApi/swap/v3/quote/klines"
         params = {"symbol": self._to_bingx_symbol(symbol), "interval": interval, "limit": min(limit, 1440)}
+        if start_time is not None:
+            params["startTime"] = int(start_time)
+        if end_time is not None:
+            params["endTime"] = int(end_time)
         data = await self._request(url, params)
         rows = self._unwrap(data)
         if not rows:
