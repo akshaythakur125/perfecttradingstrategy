@@ -16,8 +16,8 @@ class BacktestEngine:
                  dd_throttle_factor: float = 0.4,
                  daily_loss_limit: Optional[float] = None,
                  require_pa_confluence: bool = True,
-                 require_liquidity_sweep: bool = False,
-                 require_bos: bool = False):
+                 require_liquidity_sweep: bool = True,
+                 require_bos: bool = True):
         self.signal_engine = SignalEngine()
         # Entry filters (smart-money concepts).
         self.signal_engine.require_pa_confluence = require_pa_confluence

@@ -30,8 +30,8 @@ class SignalEngine:
         # grabs liquidity beyond a recent extreme and reclaims it. BOS: require a
         # confirmed break of structure in the trade direction. Validated to lift
         # win rate and cut drawdown; off by default (they reduce trade frequency).
-        self.require_liquidity_sweep = False
-        self.require_bos = False
+        self.require_liquidity_sweep = True
+        self.require_bos = True
         self.sweep_lookback = 16
 
     def evaluate_long_setup(self, df_4h: pd.DataFrame, df_15m: pd.DataFrame,
