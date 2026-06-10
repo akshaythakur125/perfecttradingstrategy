@@ -21,7 +21,7 @@ from engines.signal_engine import SignalEngine
 from engines.risk_manager import RiskManager
 from engines.backtest_engine import BacktestEngine
 from engines.data_collector import DataCollector
-from engines.exchange_clients import RateLimiter
+from engines.exchange_clients import RateLimiter, BingXClient
 from engines.scanner import ScannerEngine
 
 
@@ -688,6 +688,46 @@ class TestBacktestEngine:
 # ============================================================
 # RATE LIMITER
 # ============================================================
+
+class TestBingXClient:
+    def test_symbol_to_bingx(self):
+        assert BingXClient._to_bingx_symbol("BTCUSDT") == "BTC-USDT"
+        assert BingXClient._to_bingx_symbol("ETHUSDT") == "ETH-USDT"
+        assert BingXClient._to_bingx_symbol("BTC-USDT") == "BTC-USDT"
+
+    def test_symbol_from_bingx(self):
+        assert BingXClient._from_bingx_symbol("BTC-USDT") == "BTCUSDT"
+        assert BingXClient._from_bingx_symbol("sol-usdt") == "SOLUSDT"
+
+    def test_unwrap(self):
+        assert BingXClient._unwrap({"code": 0, "data": [1, 2]}) == [1, 2]
+        assert BingXClient._unwrap([1, 2]) == [1, 2]
+
+    def test_parse_klines_dict_form(self):
+        client = BingXClient()
+        rows = [
+            {"time": 1700000900000, "open": "2", "high": "3", "low": "1", "close": "2.5", "volume": "10"},
+            {"time": 1700000000000, "open": "1", "high": "2", "low": "0.5", "close": "1.5", "volume": "5"},
+        ]
+        df = client._parse_klines(rows)
+        assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
+        assert df["timestamp"].is_monotonic_increasing  # sorted ascending
+        assert df.iloc[0]["close"] == 1.5
+
+    def test_parse_klines_array_form(self):
+        client = BingXClient()
+        rows = [[1700000000000, "1", "2", "0.5", "1.5", "5"]]
+        df = client._parse_klines(rows)
+        assert df.iloc[0]["high"] == 2.0
+
+    def test_sign_is_deterministic(self):
+        client = BingXClient()
+        client.secret_key = "testsecret"
+        q1, s1 = client._sign({"symbol": "BTC-USDT", "timestamp": 123})
+        q2, s2 = client._sign({"timestamp": 123, "symbol": "BTC-USDT"})
+        assert q1 == q2 and s1 == s2  # order-independent (sorted keys)
+        assert len(s1) == 64  # sha256 hex
+
 
 class TestRateLimiter:
     @pytest.mark.asyncio

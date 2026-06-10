@@ -1,15 +1,17 @@
 from typing import Optional, List, Dict
 import pandas as pd
-from engines.exchange_clients import BinanceClient, OKXClient
+from engines.exchange_clients import BinanceClient, OKXClient, BingXClient
 
 
 class DataCollector:
     def __init__(self):
         self.binance = BinanceClient()
         self.okx = OKXClient()
+        self.bingx = BingXClient()
         self.clients = {
             "BINANCE": self.binance,
             "OKX": self.okx,
+            "BINGX": self.bingx,
         }
 
     async def get_klines(self, symbol: str, exchange: str = "BINANCE",
@@ -74,5 +76,8 @@ class DataCollector:
         return data
 
     async def get_top_pairs_by_volume(self, exchange: str = "BINANCE", top_n: int = 50) -> List[str]:
+        client = self.clients.get(exchange.upper())
+        if client and hasattr(client, "get_top_pairs_by_volume"):
+            return await client.get_top_pairs_by_volume(top_n)
         pairs = await self.get_usdt_pairs(exchange)
         return pairs[:top_n]

@@ -63,6 +63,12 @@ class ScannerEngine:
 
         return None
 
+    async def scan_top_perpetuals(self, exchange: str = "BINGX", top_n: int = 200) -> List[Dict]:
+        """Discover the top-N perpetuals by 24h volume on the exchange and scan
+        each with the active strategy. Read-only; no API key required."""
+        pairs = await self.data_collector.get_top_pairs_by_volume(exchange, top_n)
+        return await self.scan_all_pairs(pairs, exchange)
+
     async def scan_all_pairs(self, pairs: List[str], exchange: str = "BINANCE") -> List[Dict]:
         sem = asyncio.Semaphore(10)
         async def bounded_scan(pair):

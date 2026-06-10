@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     okx_passphrase: Optional[str] = None
     okx_testnet: bool = True
 
+    # BingX: only needed for private/order endpoints. Public market-data
+    # scanning (klines/tickers) requires no credentials.
+    bingx_api_key: Optional[str] = None
+    bingx_secret_key: Optional[str] = None
+
     jwt_secret: str = "super-secret-key-change-in-production"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = Field(default=60, ge=15, le=1440)

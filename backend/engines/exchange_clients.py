@@ -202,3 +202,137 @@ class OKXClient(BaseExchangeClient):
                 cleaned = inst["instId"].replace("-SWAP", "").replace("-", "")
                 pairs.append(cleaned)
         return pairs
+
+
+class BingXClient(BaseExchangeClient):
+    """BingX USDT-M perpetual swap client.
+
+    Market-data endpoints used for scanning are PUBLIC and need no API key.
+    Credentials (settings.bingx_*) are only required for private/account or
+    order-placement endpoints (signing helper provided for future use).
+
+    Note: built to BingX's documented swap API; exact JSON field names should
+    be confirmed against a live response, as this environment cannot reach the
+    exchange. Parsing is defensive about dict-vs-list response shapes.
+    """
+    BASE_URL = "https://open-api.bingx.com"
+    VALID_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h",
+                       "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
+
+    def __init__(self):
+        super().__init__()
+        self.api_key = settings.bingx_api_key
+        self.secret_key = settings.bingx_secret_key
+
+    @staticmethod
+    def _to_bingx_symbol(symbol: str) -> str:
+        """Internal 'BTCUSDT' -> BingX 'BTC-USDT'."""
+        s = symbol.upper()
+        if "-" in s:
+            return s
+        if s.endswith("USDT"):
+            return f"{s[:-4]}-USDT"
+        return s
+
+    @staticmethod
+    def _from_bingx_symbol(symbol: str) -> str:
+        """BingX 'BTC-USDT' -> internal 'BTCUSDT'."""
+        return symbol.upper().replace("-", "")
+
+    @staticmethod
+    def _unwrap(data):
+        """BingX wraps payloads as {code, msg, data: ...}; return the data part."""
+        if isinstance(data, dict):
+            return data.get("data", data)
+        return data
+
+    async def get_klines(self, symbol: str, interval: str, limit: int = 200) -> Optional[pd.DataFrame]:
+        if interval not in self.VALID_INTERVALS:
+            return None
+        url = f"{self.BASE_URL}/openApi/swap/v3/quote/klines"
+        params = {"symbol": self._to_bingx_symbol(symbol), "interval": interval, "limit": min(limit, 1440)}
+        data = await self._request(url, params)
+        rows = self._unwrap(data)
+        if not rows:
+            return None
+        return self._parse_klines(rows)
+
+    def _parse_klines(self, rows: List) -> pd.DataFrame:
+        recs = []
+        for k in rows:
+            if isinstance(k, dict):
+                ts = k.get("time", k.get("T", k.get("t")))
+                recs.append({
+                    "timestamp": int(ts),
+                    "open": float(k["open"]), "high": float(k["high"]),
+                    "low": float(k["low"]), "close": float(k["close"]),
+                    "volume": float(k["volume"]),
+                })
+            else:  # array form [time, open, high, low, close, volume]
+                recs.append({
+                    "timestamp": int(k[0]), "open": float(k[1]), "high": float(k[2]),
+                    "low": float(k[3]), "close": float(k[4]), "volume": float(k[5]),
+                })
+        df = pd.DataFrame(recs)
+        if df.empty:
+            return df
+        return df.sort_values("timestamp").reset_index(drop=True)[
+            ["timestamp", "open", "high", "low", "close", "volume"]
+        ]
+
+    async def get_contracts(self) -> List[Dict]:
+        url = f"{self.BASE_URL}/openApi/swap/v2/quote/contracts"
+        return self._unwrap(await self._request(url)) or []
+
+    async def get_usdt_pairs(self) -> List[str]:
+        pairs = []
+        for c in await self.get_contracts():
+            sym = c.get("symbol", "")
+            if sym.endswith("-USDT") and c.get("status", 1) in (1, "1", True):
+                pairs.append(self._from_bingx_symbol(sym))
+        return pairs
+
+    async def get_24hr_ticker(self, symbol: Optional[str] = None):
+        url = f"{self.BASE_URL}/openApi/swap/v2/quote/ticker"
+        params = {"symbol": self._to_bingx_symbol(symbol)} if symbol else None
+        return await self._request(url, params)
+
+    async def get_top_pairs_by_volume(self, top_n: int = 200) -> List[str]:
+        rows = self._unwrap(await self.get_24hr_ticker()) or []
+        ranked = []
+        for t in rows:
+            sym = t.get("symbol", "")
+            if not sym.endswith("-USDT"):
+                continue
+            qv = float(t.get("quoteVolume") or t.get("volume") or 0)
+            ranked.append((self._from_bingx_symbol(sym), qv))
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        return [s for s, _ in ranked[:top_n]]
+
+    async def get_funding_rate(self, symbol: str) -> Optional[float]:
+        url = f"{self.BASE_URL}/openApi/swap/v2/quote/premiumIndex"
+        d = self._unwrap(await self._request(url, {"symbol": self._to_bingx_symbol(symbol)}))
+        if isinstance(d, list) and d:
+            d = d[0]
+        try:
+            return float(d["lastFundingRate"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+    async def get_open_interest(self, symbol: str) -> Optional[float]:
+        url = f"{self.BASE_URL}/openApi/swap/v2/quote/openInterest"
+        d = self._unwrap(await self._request(url, {"symbol": self._to_bingx_symbol(symbol)}))
+        if isinstance(d, list) and d:
+            d = d[0]
+        try:
+            return float(d["openInterest"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+    def _sign(self, params: Dict) -> tuple:
+        """HMAC-SHA256 signing for private endpoints (orders/account)."""
+        query = "&".join(f"{k}={params[k]}" for k in sorted(params))
+        signature = hmac.new(
+            (self.secret_key or "").encode(), query.encode(), hashlib.sha256
+        ).hexdigest()
+        return query, signature
