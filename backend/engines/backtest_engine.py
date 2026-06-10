@@ -117,7 +117,29 @@ class BacktestEngine:
             tp2 = signal.get("take_profit_2", entry)
             direction = signal["direction"]
 
-            entry_px = entry * (1 + self.slippage_pct if direction == "LONG" else 1 - self.slippage_pct)
+            # Limit-entry improvement: rest an order `limit_entry_price` into the
+            # retrace and fill there (same stop -> tighter risk, higher R). Cancel
+            # if price never reaches it within `limit_expiry_bars`.
+            limit_px = signal.get("limit_entry_price")
+            expiry = int(signal.get("limit_expiry_bars") or 0)
+            limit_filled = False
+            if limit_px is not None and expiry > 0:
+                for fb in range(e15 + 1, min(e15 + 1 + expiry, max_idx_15m)):
+                    fbar = df_15m.iloc[fb]
+                    if (direction == "LONG" and fbar["low"] <= limit_px) or \
+                       (direction == "SHORT" and fbar["high"] >= limit_px):
+                        entry = limit_px
+                        entry_bar_15m_start = fb
+                        limit_filled = True
+                        break
+                if not limit_filled:
+                    equity_curve.append(capital)  # order expired unfilled
+                    continue
+
+            if limit_filled:
+                entry_px = entry                       # resting limit: no adverse slippage
+            else:
+                entry_px = entry * (1 + self.slippage_pct if direction == "LONG" else 1 - self.slippage_pct)
             stop_px = sl * (1 - self.slippage_pct if direction == "LONG" else 1 + self.slippage_pct)
 
             # Effective risk: throttle down while in drawdown.

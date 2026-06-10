@@ -22,9 +22,8 @@ async def main(top_n: int, exchange: str):
     print(f"\n{len(signals)} signal(s) found:\n")
     for s in signals:
         print(f"  {s['symbol']:14} {s['direction']:5} conf={s.get('confidence_score',0):5} "
-              f"entry={s.get('entry_price')} stop={s.get('stop_loss')} "
-              f"tp1={s.get('take_profit_1')} tp2={s.get('take_profit_2')} "
-              f"R:R(3R target)")
+              f"limit={s.get('limit_entry_price')} (mkt {s.get('entry_price')}) "
+              f"stop={s.get('stop_loss')} tp1={s.get('take_profit_1')} tp2={s.get('take_profit_2')}")
     out = {"timestamp": datetime.now(timezone.utc).isoformat(),
            "exchange": exchange, "top_n": top_n, "count": len(signals), "signals": signals}
     path = os.path.join(os.path.dirname(__file__), "..", "live_signals.json")

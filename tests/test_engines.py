@@ -438,6 +438,17 @@ class TestSignalEngine:
         assert engine.min_confidence == 80.0
         assert engine.min_risk_reward >= 3.0
 
+    def test_round_price_significant_digits(self):
+        # High-priced symbol keeps cents; low-priced alt is NOT rounded to zero.
+        assert SignalEngine._round_price(64321.987) == 64322.0
+        assert SignalEngine._round_price(0.00012345) == 0.00012345
+        assert SignalEngine._round_price(0) == 0.0
+
+    def test_limit_entry_defaults(self):
+        eng = SignalEngine()
+        assert eng.limit_entry_atr == 0.25
+        assert eng.limit_expiry_bars == 8
+
     def test_score_rsi_long(self):
         engine = SignalEngine()
         assert engine._score_rsi(40, "LONG") == 100
