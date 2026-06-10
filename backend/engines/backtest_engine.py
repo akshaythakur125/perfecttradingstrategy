@@ -5,17 +5,32 @@ from datetime import datetime, timedelta
 from engines.indicators import compute_all_indicators
 from engines.signal_engine import SignalEngine
 from engines.risk_manager import RiskManager
+from config.settings import settings
 
 
 class BacktestEngine:
     def __init__(self, slippage_pct: float = 0.001, fee_pct: float = 0.0004,
-                 max_hold_15m: int = 64):
+                 max_hold_15m: int = 64,
+                 risk_per_trade: Optional[float] = None,
+                 dd_throttle_level: Optional[float] = None,
+                 dd_throttle_factor: float = 0.5,
+                 daily_loss_limit: Optional[float] = None):
         self.signal_engine = SignalEngine()
         self.results = {}
         self.slippage_pct = slippage_pct
         self.fee_pct = fee_pct
         # Max bars (15M) a trade is held before a time-based exit (~16h).
         self.max_hold_15m = max_hold_15m
+        # --- Risk / drawdown controls (all optional, off by default) ---
+        # Base fraction of equity risked per trade (falls back to settings).
+        self.risk_per_trade = risk_per_trade
+        # When equity is more than `dd_throttle_level` below its peak, scale
+        # the per-trade risk by `dd_throttle_factor` (de-risk while underwater).
+        self.dd_throttle_level = dd_throttle_level
+        self.dd_throttle_factor = dd_throttle_factor
+        # Pause new entries for the rest of a day once that day's realized loss
+        # exceeds `daily_loss_limit` x (capital at the day's start).
+        self.daily_loss_limit = daily_loss_limit
 
     def run_backtest(self, df_4h: pd.DataFrame, df_15m: pd.DataFrame,
                      initial_capital: float = 10000.0,
@@ -44,6 +59,12 @@ class BacktestEngine:
         ts_15m = df_15m["timestamp"].values if "timestamp" in df_15m.columns else np.arange(max_idx_15m)
         cooldown_until_ts = -1  # block new entries until the current trade has closed
 
+        base_risk = self.risk_per_trade if self.risk_per_trade is not None else settings.risk_per_trade
+        peak_capital = capital
+        cur_day = None            # simulated calendar day (ms // 1 day)
+        day_start_capital = capital
+        day_realized = 0.0
+
         for i in range(min_bars, max_idx_4h):
             chunk_4h = df_4h.iloc[:i + 1]
             bar_ts_4h = df_4h.iloc[i]["timestamp"] if "timestamp" in df_4h.columns else i
@@ -60,6 +81,17 @@ class BacktestEngine:
                 continue
 
             if bar_ts_4h < cooldown_until_ts:  # still inside a live trade
+                equity_curve.append(capital)
+                continue
+
+            # Roll the simulated trading day for the daily-loss circuit breaker.
+            day = int(bar_ts_4h) // (86400 * 1000)
+            if day != cur_day:
+                cur_day = day
+                day_start_capital = capital
+                day_realized = 0.0
+            if (self.daily_loss_limit is not None
+                    and day_realized <= -self.daily_loss_limit * day_start_capital):
                 equity_curve.append(capital)
                 continue
 
@@ -81,7 +113,13 @@ class BacktestEngine:
             entry_px = entry * (1 + self.slippage_pct if direction == "LONG" else 1 - self.slippage_pct)
             stop_px = sl * (1 - self.slippage_pct if direction == "LONG" else 1 + self.slippage_pct)
 
-            pos_data = risk_mgr.calculate_position_size(entry_px, stop_px)
+            # Effective risk: throttle down while in drawdown.
+            eff_risk = base_risk
+            if self.dd_throttle_level is not None and peak_capital > 0:
+                if (peak_capital - capital) / peak_capital > self.dd_throttle_level:
+                    eff_risk *= self.dd_throttle_factor
+
+            pos_data = risk_mgr.calculate_position_size(entry_px, stop_px, eff_risk)
             if pos_data["position_size"] <= 0:
                 equity_curve.append(capital)
                 continue
@@ -171,6 +209,8 @@ class BacktestEngine:
             open_trade["pnl"] = trade_pnl
             trades.append(open_trade)
             monthly_pnl[month_key] = monthly_pnl.get(month_key, 0) + trade_pnl
+            peak_capital = max(peak_capital, capital)
+            day_realized += trade_pnl
 
             # Block new entries until this trade's exit bar (no overlapping positions).
             exit_idx = min(entry_bar_15m_start + open_trade["holding_bars"], len(ts_15m) - 1)
