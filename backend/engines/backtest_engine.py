@@ -15,10 +15,14 @@ class BacktestEngine:
                  dd_throttle_level: Optional[float] = 0.05,
                  dd_throttle_factor: float = 0.4,
                  daily_loss_limit: Optional[float] = None,
-                 require_pa_confluence: bool = True):
+                 require_pa_confluence: bool = True,
+                 require_liquidity_sweep: bool = False,
+                 require_bos: bool = False):
         self.signal_engine = SignalEngine()
-        # Require fair-value-gap / order-block confluence on entries.
+        # Entry filters (smart-money concepts).
         self.signal_engine.require_pa_confluence = require_pa_confluence
+        self.signal_engine.require_liquidity_sweep = require_liquidity_sweep
+        self.signal_engine.require_bos = require_bos
         self.results = {}
         self.slippage_pct = slippage_pct
         self.fee_pct = fee_pct

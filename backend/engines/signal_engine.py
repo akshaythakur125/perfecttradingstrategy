@@ -26,6 +26,13 @@ class SignalEngine:
         # and profit factor, so it is enabled by default.
         self.require_pa_confluence = True
         self.pa_confluence_types = ("FVG", "OB")
+        # Smart-money filters (optional). Liquidity sweep: only enter after price
+        # grabs liquidity beyond a recent extreme and reclaims it. BOS: require a
+        # confirmed break of structure in the trade direction. Validated to lift
+        # win rate and cut drawdown; off by default (they reduce trade frequency).
+        self.require_liquidity_sweep = False
+        self.require_bos = False
+        self.sweep_lookback = 16
 
     def evaluate_long_setup(self, df_4h: pd.DataFrame, df_15m: pd.DataFrame,
                             oi_change_pct: Optional[float] = None,
@@ -63,6 +70,11 @@ class SignalEngine:
         pulled_back = current_price <= ema20_15 * (1 + self.pullback_tol) and recent_low <= ema20_15
         rsi_turn = rsi > df_15m["rsi"].iloc[-2] and self.rsi_long_lo <= rsi <= self.rsi_long_hi
         if not (pulled_back and rsi_turn):
+            return None
+
+        if self.require_bos and structure_4h.get("break_of_structure") != "BULLISH":
+            return None
+        if self.require_liquidity_sweep and not self._swept_liquidity(df_15m, "LONG", current_price):
             return None
 
         # 3) Risk/target geometry: ATR stop, partial targets at 1.5R / 3R / 5R.
@@ -167,6 +179,11 @@ class SignalEngine:
         if not (pulled_up and rsi_turn):
             return None
 
+        if self.require_bos and structure_4h.get("break_of_structure") != "BEARISH":
+            return None
+        if self.require_liquidity_sweep and not self._swept_liquidity(df_15m, "SHORT", current_price):
+            return None
+
         # 3) Risk/target geometry: ATR stop, partial targets at 1.5R / 3R / 5R.
         entry = current_price
         stop_loss = entry + atr_val * self.atr_mult
@@ -229,6 +246,24 @@ class SignalEngine:
             "funding_score": scores["funding"],
             "reasons": self._generate_reasons_short(structure_4h, best_aoi, latest_15m, scores, volume_signal),
         }
+
+    def _swept_liquidity(self, df_15m: pd.DataFrame, direction: str, price: float) -> bool:
+        """True if the last few bars grabbed liquidity beyond a recent extreme
+        and price has reclaimed it (a stop-hunt before continuation)."""
+        lb = self.sweep_lookback
+        if direction == "LONG":
+            lows = df_15m["low"].values
+            if len(lows) < lb + 1:
+                return False
+            prior_low = lows[-lb:-3].min()
+            recent_low = lows[-3:].min()
+            return recent_low < prior_low and price > prior_low
+        highs = df_15m["high"].values
+        if len(highs) < lb + 1:
+            return False
+        prior_high = highs[-lb:-3].max()
+        recent_high = highs[-3:].max()
+        return recent_high > prior_high and price < prior_high
 
     def _has_pa_confluence(self, relevant_aois: List[Dict]) -> bool:
         """True if any nearby zone is a fair-value gap or order block."""
