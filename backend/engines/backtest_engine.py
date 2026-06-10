@@ -14,8 +14,11 @@ class BacktestEngine:
                  risk_per_trade: Optional[float] = None,
                  dd_throttle_level: Optional[float] = None,
                  dd_throttle_factor: float = 0.5,
-                 daily_loss_limit: Optional[float] = None):
+                 daily_loss_limit: Optional[float] = None,
+                 require_pa_confluence: bool = False):
         self.signal_engine = SignalEngine()
+        # Require fair-value-gap / order-block confluence on entries.
+        self.signal_engine.require_pa_confluence = require_pa_confluence
         self.results = {}
         self.slippage_pct = slippage_pct
         self.fee_pct = fee_pct

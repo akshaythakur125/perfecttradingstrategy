@@ -21,6 +21,11 @@ class SignalEngine:
         self.rsi_long_hi = 62.0
         self.bull_regimes = ("STRONG_BULL", "WEAK_BULL")
         self.bear_regimes = ("STRONG_BEAR", "WEAK_BEAR")
+        # Optional price-action filter: require a fair-value-gap or order-block
+        # zone in confluence with the entry. Validated out-of-sample to raise
+        # win rate and profit factor; off by default to preserve behavior.
+        self.require_pa_confluence = False
+        self.pa_confluence_types = ("FVG", "OB")
 
     def evaluate_long_setup(self, df_4h: pd.DataFrame, df_15m: pd.DataFrame,
                             oi_change_pct: Optional[float] = None,
@@ -76,6 +81,8 @@ class SignalEngine:
         # 4) Supplementary confidence score (reported, used for ranking).
         aois = detect_all_aois(df_4h)
         relevant_aois = filter_relevant_aois(aois, current_price, "LONG")
+        if self.require_pa_confluence and not self._has_pa_confluence(relevant_aois):
+            return None
         best_aoi = relevant_aois[0] if relevant_aois else {
             "type": "EMA20_PULLBACK", "price_low": stop_loss, "price_high": entry, "strength_score": 60,
         }
@@ -176,6 +183,8 @@ class SignalEngine:
         # 4) Supplementary confidence score (reported, used for ranking).
         aois = detect_all_aois(df_4h)
         relevant_aois = filter_relevant_aois(aois, current_price, "SHORT")
+        if self.require_pa_confluence and not self._has_pa_confluence(relevant_aois):
+            return None
         best_aoi = relevant_aois[0] if relevant_aois else {
             "type": "EMA20_PULLBACK", "price_low": entry, "price_high": stop_loss, "strength_score": 60,
         }
@@ -220,6 +229,13 @@ class SignalEngine:
             "funding_score": scores["funding"],
             "reasons": self._generate_reasons_short(structure_4h, best_aoi, latest_15m, scores, volume_signal),
         }
+
+    def _has_pa_confluence(self, relevant_aois: List[Dict]) -> bool:
+        """True if any nearby zone is a fair-value gap or order block."""
+        return any(
+            any(t in aoi.get("type", "") for t in self.pa_confluence_types)
+            for aoi in relevant_aois
+        )
 
     def _score_structure(self, structure: Dict) -> float:
         regime = structure.get("regime", "RANGE")
