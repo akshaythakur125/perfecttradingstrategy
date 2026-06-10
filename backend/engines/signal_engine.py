@@ -21,10 +21,10 @@ class SignalEngine:
         self.rsi_long_hi = 62.0
         self.bull_regimes = ("STRONG_BULL", "WEAK_BULL")
         self.bear_regimes = ("STRONG_BEAR", "WEAK_BEAR")
-        # Optional price-action filter: require a fair-value-gap or order-block
-        # zone in confluence with the entry. Validated out-of-sample to raise
-        # win rate and profit factor; off by default to preserve behavior.
-        self.require_pa_confluence = False
+        # Price-action filter: require a fair-value-gap or order-block zone in
+        # confluence with the entry. Validated out-of-sample to raise win rate
+        # and profit factor, so it is enabled by default.
+        self.require_pa_confluence = True
         self.pa_confluence_types = ("FVG", "OB")
 
     def evaluate_long_setup(self, df_4h: pd.DataFrame, df_15m: pd.DataFrame,

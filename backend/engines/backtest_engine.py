@@ -11,11 +11,11 @@ from config.settings import settings
 class BacktestEngine:
     def __init__(self, slippage_pct: float = 0.001, fee_pct: float = 0.0004,
                  max_hold_15m: int = 64,
-                 risk_per_trade: Optional[float] = None,
-                 dd_throttle_level: Optional[float] = None,
-                 dd_throttle_factor: float = 0.5,
+                 risk_per_trade: Optional[float] = 0.05,
+                 dd_throttle_level: Optional[float] = 0.05,
+                 dd_throttle_factor: float = 0.4,
                  daily_loss_limit: Optional[float] = None,
-                 require_pa_confluence: bool = False):
+                 require_pa_confluence: bool = True):
         self.signal_engine = SignalEngine()
         # Require fair-value-gap / order-block confluence on entries.
         self.signal_engine.require_pa_confluence = require_pa_confluence
