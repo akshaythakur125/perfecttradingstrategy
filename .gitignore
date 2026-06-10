@@ -43,3 +43,7 @@ docker/postgres-data/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Backtest data cache & generated results
+data_cache/
+github_data_backtest_results.json
