@@ -18,7 +18,11 @@ class BacktestEngine:
         self.max_hold_15m = max_hold_15m
 
     def run_backtest(self, df_4h: pd.DataFrame, df_15m: pd.DataFrame,
-                     initial_capital: float = 10000.0) -> Dict:
+                     initial_capital: float = 10000.0,
+                     trade_start_ts: Optional[float] = None) -> Dict:
+        """Walk-forward backtest. If `trade_start_ts` (ms) is given, all prior
+        bars are used only for indicator warmup and trading begins at that
+        timestamp with `initial_capital` intact."""
         df_4h = compute_all_indicators(df_4h)
         df_15m = compute_all_indicators(df_15m)
 
@@ -49,6 +53,10 @@ class BacktestEngine:
 
             if len(chunk_4h) < min_bars or len(chunk_15m) < min_bars or e15 < min_bars:
                 equity_curve.append(capital)
+                continue
+
+            if trade_start_ts is not None and bar_ts_4h < trade_start_ts:
+                equity_curve.append(capital)  # warmup region: no trading
                 continue
 
             if bar_ts_4h < cooldown_until_ts:  # still inside a live trade
