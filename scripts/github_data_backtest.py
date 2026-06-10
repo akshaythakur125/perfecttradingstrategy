@@ -130,64 +130,44 @@ def main():
     df_15m_full = resample(df_1m, "15min")
     print(f"  Resampled: {len(df_4h_full):,} 4H bars | {len(df_15m_full):,} 15M bars")
 
-    df_4h = df_4h_full.tail(WARMUP_CANDLES_4H).reset_index(drop=True)
-    df_15m = df_15m_full.tail(WARMUP_CANDLES_15M).reset_index(drop=True)
+    # Run over the full available history (full walk-forward, no look-ahead).
+    df_4h = df_4h_full.reset_index(drop=True)
+    df_15m = df_15m_full.reset_index(drop=True)
+    last_ts = int(df_4h["timestamp"].iloc[-1])
 
-    def span(df):
-        a = datetime.fromtimestamp(df["timestamp"].iloc[0] / 1000, tz=timezone.utc)
-        b = datetime.fromtimestamp(df["timestamp"].iloc[-1] / 1000, tz=timezone.utc)
-        return a, b
-    a4, b4 = span(df_4h)
-    a15, b15 = span(df_15m)
-    print(f"  4H window:  {a4.date()} -> {b4.date()}  ({len(df_4h)} bars)")
-    print(f"  15M window: {a15.date()} -> {b15.date()}  ({len(df_15m)} bars)")
-
-    print("\n  Running backtest...")
+    print("\n  Running backtest over full history (this takes a few minutes)...")
     engine = BacktestEngine(slippage_pct=0.001, fee_pct=0.0004)
     result = engine.run_backtest(df_4h.copy(), df_15m.copy(), initial_capital=10000.0)
     trades = result.get("trades", [])
     for t in trades:
         t["symbol"] = SYMBOL
 
-    m = compute_metrics(trades)
+    def report(label, tr):
+        m = compute_metrics(tr)
+        print(f"\n  {label}")
+        print(f"    Trades: {m['total_trades']}  | Win rate: {m['win_rate_pct']}%  | "
+              f"Profit factor: {m['profit_factor']}")
+        print(f"    Net PnL: ${m['total_pnl']} ({round(m['total_pnl']/100,2)}% on $10k)  | "
+              f"Max DD: {m['max_drawdown_pct']}%  | Sharpe: {m['sharpe_ratio']}")
+        print(f"    Expectancy: ${m['expectancy']}/trade  | Avg win/loss: "
+              f"${m['avg_win']}/${m['avg_loss']}  | Avg R:R: {m['average_rr']}")
+        return m
 
     print("\n" + "=" * 100)
-    print("PERFORMANCE REPORT  (BTC/USD)")
+    print("PERFORMANCE REPORT  (BTC/USD, honest full walk-forward)")
     print("=" * 100)
-    print(f"  Total trades:      {m['total_trades']}")
-    print(f"  Winning / Losing:  {m['winning_trades']} / {m['losing_trades']}")
-    print(f"  Win rate:          {m['win_rate_pct']}%")
-    print(f"  Profit factor:     {m['profit_factor']}")
-    print(f"  Net PnL:           ${m['total_pnl']}  on $10,000")
-    print(f"  Return:            {round(m['total_pnl']/10000*100, 2)}%")
-    print(f"  Max drawdown:      {m['max_drawdown_pct']}%")
-    print(f"  Sharpe ratio:      {m['sharpe_ratio']}")
-    print(f"  Average R:R:       {m['average_rr']}")
-    print(f"  Expectancy:        ${m['expectancy']} / trade")
-    print(f"  Avg win / loss:    ${m['avg_win']} / ${m['avg_loss']}")
-    print(f"  Best / worst:      ${m['max_win']} / ${m['max_loss']}")
-    print(f"  Engine extras:     partial_exits={result.get('total_partial_exits',0)} "
-          f"breakeven={result.get('breakeven_trades',0)} trailing={result.get('trailing_activated_trades',0)}")
+    m_full = report("FULL PERIOD", trades)
 
-    if trades:
-        print(f"\n{'-'*100}\nTRADE LOG\n{'-'*100}")
-        for t in sorted(trades, key=lambda x: x.get("entry_time", 0)):
-            pnl = t.get("pnl", 0)
-            risk = t.get("dollar_risk", 1) or 1
-            rr = abs(pnl) / risk
-            parts = t.get("partial_exits", [])
-            tag = ", ".join(f"TP{e['tp']}" for e in parts) if parts else "SL/TIME"
-            print(f"  {t.get('direction','?'):<5} entry=${t.get('entry',0):<10.2f} "
-                  f"sl=${t.get('stop_loss',0):<10.2f} exit=${t.get('exit_price',0):<10.2f} "
-                  f"pnl=${pnl:<+9.2f} rr={rr:<4.2f} conf={t.get('confidence_score',0):<5} [{tag}]")
+    cutoff = last_ts - 30 * 86400 * 1000
+    last_month = [t for t in trades if int(t.get("entry_time", 0) or 0) >= cutoff]
+    m_month = report("LAST 30 DAYS", last_month)
 
     out = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "data_source": "Bitstamp BTC/USD 1m (ff137/bitstamp-btcusd-minute-data), resampled",
         "symbol": SYMBOL,
-        "4h_window": [str(a4), str(b4)],
-        "15m_window": [str(a15), str(b15)],
-        "metrics": m,
+        "full_period": m_full,
+        "last_30_days": m_month,
         "engine_extras": {
             "total_partial_exits": result.get("total_partial_exits", 0),
             "breakeven_trades": result.get("breakeven_trades", 0),

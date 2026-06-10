@@ -9,8 +9,18 @@ from config.settings import settings
 
 class SignalEngine:
     def __init__(self):
+        # Reported "high-conviction" confidence label (not a hard entry gate).
         self.min_confidence = 80.0
+        # Full-target R:R requirement (trades aim for a 3R take-profit).
         self.min_risk_reward = settings.min_risk_reward
+        # Trend-pullback entry parameters (validated out-of-sample on real data).
+        self.atr_mult = 2.0            # ATR-multiple for the protective stop
+        self.pullback_tol = 0.004      # how close price must be to the 15m EMA20
+        self.pullback_lookback = 8     # bars to confirm a genuine pullback touch
+        self.rsi_long_lo = 35.0        # RSI band for long re-entry (momentum turning up)
+        self.rsi_long_hi = 62.0
+        self.bull_regimes = ("STRONG_BULL", "WEAK_BULL")
+        self.bear_regimes = ("STRONG_BEAR", "WEAK_BEAR")
 
     def evaluate_long_setup(self, df_4h: pd.DataFrame, df_15m: pd.DataFrame,
                             oi_change_pct: Optional[float] = None,
@@ -20,69 +30,70 @@ class SignalEngine:
         if "rsi" not in df_15m.columns:
             df_15m = compute_all_indicators(df_15m)
 
-        structure_4h = analyze_market_structure(df_4h)
-        structure_15m = analyze_market_structure(df_15m)
+        if len(df_4h) < 50 or len(df_15m) < self.pullback_lookback + 2:
+            return None
 
+        # 1) Higher-timeframe filter: only trade with an established 4H uptrend.
+        structure_4h = analyze_market_structure(df_4h)
         if structure_4h["trend"] != "BULLISH":
             return None
-
-        current_price = df_15m["close"].values[-1]
-        aois = detect_all_aois(df_4h)
-        relevant_aois = filter_relevant_aois(aois, current_price, "LONG")
-
-        if not relevant_aois:
+        if structure_4h["regime"] not in self.bull_regimes:
             return None
 
-        best_aoi = relevant_aois[0]
+        r4 = df_4h.iloc[-1]
+        current_price = float(df_15m["close"].values[-1])
+        # Price must be on the bullish side of both the 4H EMA50 and EMA200.
+        if current_price <= r4["ema_50"] or current_price <= r4["ema_200"]:
+            return None
 
         latest_15m = df_15m.iloc[-1]
-        rsi_rising = latest_15m["rsi"] > df_15m["rsi"].iloc[-5]
-        rsi_range_ok = 30 <= latest_15m["rsi"] <= 65
-        rsi_bullish = rsi_range_ok and rsi_rising
+        ema20_15 = latest_15m["ema_20"]
+        atr_val = latest_15m["atr"]
+        rsi = latest_15m["rsi"]
+        if atr_val <= 0:
+            return None
 
-        obv_rising = len(df_15m) >= 3 and df_15m["obv"].iloc[-1] > df_15m["obv"].iloc[-3]
-        obv_slope_positive = latest_15m["obv_slope"] > 0
-        obv_confirmed = obv_rising or obv_slope_positive
+        # 2) Entry trigger: a pullback into the 15M EMA20 with momentum turning back up.
+        recent_low = df_15m["low"].values[-self.pullback_lookback:].min()
+        pulled_back = current_price <= ema20_15 * (1 + self.pullback_tol) and recent_low <= ema20_15
+        rsi_turn = rsi > df_15m["rsi"].iloc[-2] and self.rsi_long_lo <= rsi <= self.rsi_long_hi
+        if not (pulled_back and rsi_turn):
+            return None
 
+        # 3) Risk/target geometry: ATR stop, partial targets at 1.5R / 3R / 5R.
+        entry = current_price
+        stop_loss = entry - atr_val * self.atr_mult
+        risk = entry - stop_loss
+        if risk <= 0:
+            return None
+        tp1 = entry + risk * 1.5
+        tp2 = entry + risk * 3.0
+        tp3 = entry + risk * 5.0
+        risk_reward = (tp2 - entry) / risk  # full target is 3R
+        if risk_reward < self.min_risk_reward:
+            return None
+
+        # 4) Supplementary confidence score (reported, used for ranking).
+        aois = detect_all_aois(df_4h)
+        relevant_aois = filter_relevant_aois(aois, current_price, "LONG")
+        best_aoi = relevant_aois[0] if relevant_aois else {
+            "type": "EMA20_PULLBACK", "price_low": stop_loss, "price_high": entry, "strength_score": 60,
+        }
+        obv_confirmed = latest_15m["obv_slope"] > 0
         volume_signal = get_volume_signal(
             df_15m["volume"].values,
             df_15m["volume_ma"].values,
             df_15m["volume_std"].values,
         )
-        ema_bullish = latest_15m["ema_alignment"] == "BULLISH"
-
-        if not all([rsi_bullish, obv_confirmed, volume_signal > 30, ema_bullish]):
-            return None
-
-        atr_val = latest_15m["atr"]
-        aoi_low = best_aoi.get("price_low", current_price * 0.99)
-        atr_stop = current_price - (atr_val * 2.0)
-        stop_loss = min(aoi_low, atr_stop) * 0.995
-
-        entry = current_price
-        tp1 = entry + (entry - stop_loss) * 1.5
-        tp2 = entry + (entry - stop_loss) * 3.0
-        tp3 = entry + (entry - stop_loss) * 5.0
-        risk_reward = (tp1 - entry) / (entry - stop_loss)
-
-        if risk_reward < self.min_risk_reward:
-            return None
-
-        oi_score_val = self._score_oi(oi_change_pct, "LONG")
-        funding_score_val = self._score_funding(funding_rate, "LONG")
-
         scores = self._score_setup(
             structure_score=self._score_structure(structure_4h),
-            aoi_score=best_aoi.get("strength_score", 50),
+            aoi_score=best_aoi.get("strength_score", 60),
             volume_score=min(volume_signal, 100),
-            rsi_score=self._score_rsi(latest_15m["rsi"], "LONG"),
-            obv_score=100 if obv_confirmed else 0,
-            oi_score=oi_score_val,
-            funding_score=funding_score_val,
+            rsi_score=self._score_rsi(rsi, "LONG"),
+            obv_score=100 if obv_confirmed else 40,
+            oi_score=self._score_oi(oi_change_pct, "LONG"),
+            funding_score=self._score_funding(funding_rate, "LONG"),
         )
-
-        if scores["total"] < self.min_confidence:
-            return None
 
         return {
             "symbol": df_4h.get("symbol", df_15m.get("symbol", "UNKNOWN")),
@@ -118,70 +129,71 @@ class SignalEngine:
         if "rsi" not in df_15m.columns:
             df_15m = compute_all_indicators(df_15m)
 
-        structure_4h = analyze_market_structure(df_4h)
-        structure_15m = analyze_market_structure(df_15m)
+        if len(df_4h) < 50 or len(df_15m) < self.pullback_lookback + 2:
+            return None
 
+        # 1) Higher-timeframe filter: only trade with an established 4H downtrend.
+        structure_4h = analyze_market_structure(df_4h)
         if structure_4h["trend"] != "BEARISH":
             return None
-
-        current_price = df_15m["close"].values[-1]
-        aois = detect_all_aois(df_4h)
-        relevant_aois = filter_relevant_aois(aois, current_price, "SHORT")
-
-        if not relevant_aois:
+        if structure_4h["regime"] not in self.bear_regimes:
             return None
 
-        best_aoi = relevant_aois[0]
+        r4 = df_4h.iloc[-1]
+        current_price = float(df_15m["close"].values[-1])
+        # Price must be on the bearish side of both the 4H EMA50 and EMA200.
+        if current_price >= r4["ema_50"] or current_price >= r4["ema_200"]:
+            return None
 
         latest_15m = df_15m.iloc[-1]
-        rsi_overbought = latest_15m["rsi"] >= 70
-        rsi_falling = latest_15m["rsi"] < df_15m["rsi"].iloc[-5]
-        rsi_weak = 50 <= latest_15m["rsi"] <= 70 and rsi_falling
-        rsi_bearish = rsi_overbought or rsi_weak
+        ema20_15 = latest_15m["ema_20"]
+        atr_val = latest_15m["atr"]
+        rsi = latest_15m["rsi"]
+        if atr_val <= 0:
+            return None
 
-        obv_falling = len(df_15m) >= 3 and df_15m["obv"].iloc[-1] < df_15m["obv"].iloc[-3]
-        obv_slope_negative = latest_15m["obv_slope"] < 0
-        obv_confirmed = obv_falling or obv_slope_negative
+        # 2) Entry trigger: a pull-up into the 15M EMA20 with momentum turning back down.
+        recent_high = df_15m["high"].values[-self.pullback_lookback:].max()
+        pulled_up = current_price >= ema20_15 * (1 - self.pullback_tol) and recent_high >= ema20_15
+        rsi_turn = (rsi < df_15m["rsi"].iloc[-2]
+                    and (100 - self.rsi_long_hi) <= rsi <= (100 - self.rsi_long_lo))
+        if not (pulled_up and rsi_turn):
+            return None
 
+        # 3) Risk/target geometry: ATR stop, partial targets at 1.5R / 3R / 5R.
+        entry = current_price
+        stop_loss = entry + atr_val * self.atr_mult
+        risk = stop_loss - entry
+        if risk <= 0:
+            return None
+        tp1 = entry - risk * 1.5
+        tp2 = entry - risk * 3.0
+        tp3 = entry - risk * 5.0
+        risk_reward = (entry - tp2) / risk  # full target is 3R
+        if risk_reward < self.min_risk_reward:
+            return None
+
+        # 4) Supplementary confidence score (reported, used for ranking).
+        aois = detect_all_aois(df_4h)
+        relevant_aois = filter_relevant_aois(aois, current_price, "SHORT")
+        best_aoi = relevant_aois[0] if relevant_aois else {
+            "type": "EMA20_PULLBACK", "price_low": entry, "price_high": stop_loss, "strength_score": 60,
+        }
+        obv_confirmed = latest_15m["obv_slope"] < 0
         volume_signal = get_volume_signal(
             df_15m["volume"].values,
             df_15m["volume_ma"].values,
             df_15m["volume_std"].values,
         )
-        ema_bearish = latest_15m["ema_alignment"] == "BEARISH"
-
-        if not all([rsi_bearish, obv_confirmed, volume_signal > 30, ema_bearish]):
-            return None
-
-        atr_val = latest_15m["atr"]
-        aoi_high = best_aoi.get("price_high", current_price * 1.01)
-        atr_stop = current_price + (atr_val * 2.0)
-        stop_loss = max(aoi_high, atr_stop) * 1.005
-
-        entry = current_price
-        tp1 = entry - (stop_loss - entry) * 1.5
-        tp2 = entry - (stop_loss - entry) * 3.0
-        tp3 = entry - (stop_loss - entry) * 5.0
-        risk_reward = (entry - tp1) / (stop_loss - entry)
-
-        if risk_reward < self.min_risk_reward:
-            return None
-
-        oi_score_val = self._score_oi(oi_change_pct, "SHORT")
-        funding_score_val = self._score_funding(funding_rate, "SHORT")
-
         scores = self._score_setup(
             structure_score=self._score_structure(structure_4h),
-            aoi_score=best_aoi.get("strength_score", 50),
+            aoi_score=best_aoi.get("strength_score", 60),
             volume_score=min(volume_signal, 100),
-            rsi_score=self._score_rsi(latest_15m["rsi"], "SHORT"),
-            obv_score=100 if obv_confirmed else 0,
-            oi_score=oi_score_val,
-            funding_score=funding_score_val,
+            rsi_score=self._score_rsi(rsi, "SHORT"),
+            obv_score=100 if obv_confirmed else 40,
+            oi_score=self._score_oi(oi_change_pct, "SHORT"),
+            funding_score=self._score_funding(funding_rate, "SHORT"),
         )
-
-        if scores["total"] < self.min_confidence:
-            return None
 
         return {
             "symbol": df_4h.get("symbol", df_15m.get("symbol", "UNKNOWN")),
