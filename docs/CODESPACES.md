@@ -28,18 +28,26 @@ python scripts/scan_live.py --top 150
 ```
 Prints current sweep+BOS signals and writes `live_signals.json`.
 
-## 4. Multi-asset portfolio backtest — last 30 days, top 150
+## 4. Multi-asset walk-forward backtest (the robustness check)
 ```bash
-python scripts/live_backtest.py --top 150 --days 30 --risk 0.02 --max-concurrent 5
+# 3 separate past months, top 100 perps -- shows if the edge holds across months
+python scripts/live_backtest.py --top 100 --months 3 --risk 0.02 --max-concurrent 5
+
+# single recent month, liquid names only (realistic fills)
+python scripts/live_backtest.py --top 150 --months 1 --min-volume 50000000
 ```
-Runs the strategy on each symbol, then simulates **one shared account** across
-all of them with a concurrency cap (a realistic portfolio, not 150 separate
-accounts). Reports pooled win rate, profit factor, portfolio return, max
-drawdown, trades/month, and the most active symbols. Writes
+Runs the strategy on each symbol across one or more past 30-day windows, each as
+**one shared account** with a concurrency cap (a realistic portfolio, not N
+separate accounts). Prints a per-window table (signals, win%, PF, return, max
+DD) plus a pooled summary and "positive windows / total". Writes
 `live_backtest_results.json`.
 
-Tune: `--risk` (per-trade fraction), `--max-concurrent` (open positions cap),
-`--days`, `--top`.
+**What to look for:** a real edge stays PF > 1 across *most* windows. If only
+one window shines, it was a lucky month. The `--min-volume` filter removes
+illiquid alts whose backtested fills are unrealistic.
+
+Tune: `--risk`, `--max-concurrent`, `--months`, `--top`, `--min-volume`.
+Heavier runs (more months/symbols) take longer — start at `--top 100 --months 3`.
 
 ## Honest notes
 - The strategy was validated **on BTC only**. This backtest is the first look

@@ -303,7 +303,8 @@ class BingXClient(BaseExchangeClient):
         params = {"symbol": self._to_bingx_symbol(symbol)} if symbol else None
         return await self._request(url, params)
 
-    async def get_top_pairs_by_volume(self, top_n: int = 200) -> List[str]:
+    async def get_top_pairs_by_volume(self, top_n: int = 200,
+                                      min_quote_volume: float = 0.0) -> List[str]:
         rows = self._unwrap(await self.get_24hr_ticker()) or []
         ranked = []
         for t in rows:
@@ -311,6 +312,8 @@ class BingXClient(BaseExchangeClient):
             if not sym.endswith("-USDT"):
                 continue
             qv = float(t.get("quoteVolume") or t.get("volume") or 0)
+            if qv < min_quote_volume:
+                continue
             ranked.append((self._from_bingx_symbol(sym), qv))
         ranked.sort(key=lambda x: x[1], reverse=True)
         return [s for s, _ in ranked[:top_n]]
