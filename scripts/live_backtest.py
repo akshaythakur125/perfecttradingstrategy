@@ -16,9 +16,9 @@ import sys, os, asyncio, json, argparse
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
+from concurrent.futures import ProcessPoolExecutor
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 from engines.exchange_clients import BingXClient
-from engines.backtest_engine import BacktestEngine
 
 MS_15M = 15 * 60 * 1000
 DAY_MS = 86400 * 1000
@@ -43,11 +43,13 @@ async def fetch_paged(client, symbol, interval, total):
 
 
 async def fetch_symbol(client, symbol, months, window_days, sem):
-    """Fetch enough 4H + 15M history to cover all walk-forward windows."""
+    """Fetch just enough 4H + 15M history to cover all windows (+ warmup)."""
     async with sem:
         try:
-            need_15m = (months * window_days + 5) * 96           # windows + warmup
-            df_4h = await fetch_paged(client, symbol, "4h", 1440)  # ~240d, one call
+            span_days = months * window_days
+            need_4h = (span_days + 45) * 6        # window span + ~45d warmup for EMA200
+            need_15m = (span_days + 5) * 96
+            df_4h = await fetch_paged(client, symbol, "4h", min(need_4h, 1440))
             df_15m = await fetch_paged(client, symbol, "15m", max(need_15m, 1440))
         except Exception:
             return symbol, None, None
@@ -59,15 +61,14 @@ async def fetch_symbol(client, symbol, months, window_days, sem):
     return symbol, df_4h, df_15m
 
 
-def backtest_window(df_4h, df_15m, win_start, win_end):
-    """Run the engine on one window: warm up on prior bars, trade [start, end]."""
-    d4 = df_4h[df_4h["timestamp"] <= win_end]
-    d15 = df_15m[df_15m["timestamp"] <= win_end]
-    if len(d4) < 210 or len(d15) < 250:
-        return []
+def backtest_symbol(args):
+    """ONE engine pass per symbol over all windows; tag each trade with entry_ts.
+    Runs in a worker process (CPU-bound)."""
+    symbol, df_4h, df_15m, oldest_start = args
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+    from engines.backtest_engine import BacktestEngine
     try:
-        res = BacktestEngine().run_backtest(d4.copy(), d15.copy(), 10000.0,
-                                            trade_start_ts=win_start)
+        res = BacktestEngine().run_backtest(df_4h, df_15m, 10000.0, trade_start_ts=oldest_start)
     except Exception:
         return []
     trades = []
@@ -76,7 +77,7 @@ def backtest_window(df_4h, df_15m, win_start, win_end):
         if dr <= 0:
             continue
         et = int(t["entry_time"]) if str(t["entry_time"]).isdigit() else 0
-        trades.append({"symbol": df_4h["symbol"].iloc[0], "R": t["pnl"] / dr,
+        trades.append({"symbol": symbol, "R": t["pnl"] / dr,
                        "entry_ts": et, "exit_ts": et + int(t.get("holding_bars", 0)) * MS_15M})
     return trades
 
@@ -119,42 +120,43 @@ async def main(top_n, months, window_days, risk, max_concurrent, min_volume, exc
     print(f"Fetching top {top_n} {exchange} perps "
           f"(min 24h volume ${min_volume:,.0f})...")
     symbols = await client.get_top_pairs_by_volume(top_n=top_n, min_quote_volume=min_volume)
-    print(f"  {len(symbols)} symbols. Fetching history for {months} x {window_days}d windows...")
+    print(f"  {len(symbols)} symbols. Fetching {months} x {window_days}d of history each...")
     sem = asyncio.Semaphore(8)
     fetched = await asyncio.gather(*[fetch_symbol(client, s, months, window_days, sem) for s in symbols])
     await client.close()
     data = [(s, d4, d15) for s, d4, d15 in fetched if d4 is not None]
-    print(f"  {len(data)} symbols returned usable history. Backtesting windows...")
+    print(f"  {len(data)} symbols with usable history. Backtesting in parallel...")
 
     now = max(int(d4["timestamp"].iloc[-1]) for _, d4, _ in data)
-    windows = []
-    for w in range(months):
-        end = now - w * window_days * DAY_MS
-        windows.append((end - window_days * DAY_MS, end))
+    oldest_start = now - months * window_days * DAY_MS
+    jobs = [(s, d4, d15, oldest_start) for s, d4, d15 in data]
+    all_trades = []
+    with ProcessPoolExecutor(max_workers=max(1, (os.cpu_count() or 2))) as ex:
+        for trades in ex.map(backtest_symbol, jobs):
+            all_trades.extend(trades)
+    print(f"  {len(all_trades)} trades across all symbols/windows.")
 
-    rows = []
-    pooled = []
-    for wi, (ws, we) in enumerate(windows):
-        wt = []
-        for _, d4, d15 in data:
-            wt.extend(backtest_window(d4, d15, ws, we))
+    windows = [(now - (w + 1) * window_days * DAY_MS, now - w * window_days * DAY_MS)
+               for w in range(months)]
+    rows, pooled, pos = [], [], 0
+    for ws, we in windows:
+        wt = [t for t in all_trades if ws <= t["entry_ts"] < we]
         st = window_stats(wt, risk, max_concurrent)
-        label = datetime.utcfromtimestamp(ws / 1000).strftime("%Y-%m-%d") + " .. " + \
-                datetime.utcfromtimestamp(we / 1000).strftime("%Y-%m-%d")
+        label = (datetime.utcfromtimestamp(ws / 1000).strftime("%Y-%m-%d") + " .. " +
+                 datetime.utcfromtimestamp(we / 1000).strftime("%Y-%m-%d"))
         rows.append((label, st))
         if st:
             pooled.extend(wt)
+            pos += 1 if st["ret"] > 0 else 0
 
     print("\n" + "=" * 78)
     print(f"WALK-FORWARD — top {top_n} {exchange} perps, {window_days}d windows, "
           f"risk {risk*100:.0f}%, max-concurrent {max_concurrent}")
     print("=" * 78)
     print(f"  {'window':26} {'sig':>4} {'win%':>6} {'PF':>6} {'ret%':>8} {'maxDD%':>7}")
-    pos = 0
     for label, st in rows:
         if not st:
             print(f"  {label:26} {'— no trades':>26}"); continue
-        pos += 1 if st["ret"] > 0 else 0
         print(f"  {label:26} {st['signals']:>4} {st['win']:>6} {st['pf']:>6} "
               f"{st['ret']:>+8} {st['dd']:>7}")
     n_win = sum(1 for _, st in rows if st)
