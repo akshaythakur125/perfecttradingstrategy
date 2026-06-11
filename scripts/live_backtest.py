@@ -128,6 +128,11 @@ async def main(top_n, months, window_days, risk, max_concurrent, min_volume, exc
     print(f"  {len(data)} symbols with usable history. Backtesting in parallel...")
 
     now = max(int(d4["timestamp"].iloc[-1]) for _, d4, _ in data)
+    sym_15m_min = [int(d15["timestamp"].iloc[0]) for _, _, d15 in data]
+    fetched_start = min(sym_15m_min)
+    print(f"  15m history fetched: {datetime.utcfromtimestamp(fetched_start/1000):%Y-%m-%d} "
+          f".. {datetime.utcfromtimestamp(now/1000):%Y-%m-%d} "
+          f"(~{(now-fetched_start)/DAY_MS:.0f} days). Windows older than this can't be tested.")
     oldest_start = now - months * window_days * DAY_MS
     jobs = [(s, d4, d15, oldest_start) for s, d4, d15 in data]
     all_trades = []
@@ -138,42 +143,56 @@ async def main(top_n, months, window_days, risk, max_concurrent, min_volume, exc
 
     windows = [(now - (w + 1) * window_days * DAY_MS, now - w * window_days * DAY_MS)
                for w in range(months)]
-    rows, pooled, pos = [], [], 0
+    rows, pooled, pos, tested = [], [], 0, 0
     for ws, we in windows:
-        wt = [t for t in all_trades if ws <= t["entry_ts"] < we]
-        st = window_stats(wt, risk, max_concurrent)
+        # How many symbols actually have 15m data covering this window's start?
+        coverage = sum(1 for m in sym_15m_min if m <= ws)
         label = (datetime.utcfromtimestamp(ws / 1000).strftime("%Y-%m-%d") + " .. " +
                  datetime.utcfromtimestamp(we / 1000).strftime("%Y-%m-%d"))
-        rows.append((label, st))
+        if coverage == 0:
+            rows.append((label, None, "NO DATA"))      # history doesn't reach this window
+            continue
+        wt = [t for t in all_trades if ws <= t["entry_ts"] < we]
+        st = window_stats(wt, risk, max_concurrent)
+        note = "OK" if coverage == len(data) else f"PARTIAL ({coverage}/{len(data)} symbols)"
+        rows.append((label, st, note))
+        tested += 1
         if st:
             pooled.extend(wt)
             pos += 1 if st["ret"] > 0 else 0
 
-    print("\n" + "=" * 78)
+    print("\n" + "=" * 84)
     print(f"WALK-FORWARD — top {top_n} {exchange} perps, {window_days}d windows, "
           f"risk {risk*100:.0f}%, max-concurrent {max_concurrent}")
-    print("=" * 78)
-    print(f"  {'window':26} {'sig':>4} {'win%':>6} {'PF':>6} {'ret%':>8} {'maxDD%':>7}")
-    for label, st in rows:
-        if not st:
-            print(f"  {label:26} {'— no trades':>26}"); continue
-        print(f"  {label:26} {st['signals']:>4} {st['win']:>6} {st['pf']:>6} "
-              f"{st['ret']:>+8} {st['dd']:>7}")
-    n_win = sum(1 for _, st in rows if st)
+    print("=" * 84)
+    print(f"  {'window':26} {'sig':>4} {'win%':>6} {'PF':>6} {'ret%':>8} {'maxDD%':>7}  status")
+    for label, st, note in rows:
+        if note == "NO DATA":
+            print(f"  {label:26} {'':>4} {'':>6} {'':>6} {'':>8} {'':>7}  NO DATA (BingX 15m history limit)")
+        elif not st:
+            print(f"  {label:26} {0:>4} {'':>6} {'':>6} {'':>8} {'':>7}  data ok, 0 signals [{note}]")
+        else:
+            print(f"  {label:26} {st['signals']:>4} {st['win']:>6} {st['pf']:>6} "
+                  f"{st['ret']:>+8} {st['dd']:>7}  [{note}]")
     if pooled:
         Rs = [t["R"] for t in pooled]
         w = [r for r in Rs if r > 0]; l = [r for r in Rs if r <= 0]
-        print("-" * 78)
-        print(f"  POOLED across {n_win} window(s): signals={len(Rs)}  "
+        print("-" * 84)
+        print(f"  POOLED across {tested} window(s) WITH DATA: signals={len(Rs)}  "
               f"win={100*len(w)/len(Rs):.1f}%  "
               f"PF={sum(w)/abs(sum(l)):.2f}  "
-              f"positive windows={pos}/{n_win}")
+              f"positive windows={pos}/{tested}")
+    n_no_data = sum(1 for _, _, note in rows if note == "NO DATA")
+    if n_no_data:
+        print(f"  NOTE: {n_no_data}/{months} requested window(s) had NO DATA (history limit) "
+              f"and were NOT tested -- multi-month robustness is unproven for those.")
 
     out = {"timestamp": datetime.now(timezone.utc).isoformat(), "exchange": exchange,
            "top_n": top_n, "months": months, "window_days": window_days, "risk": risk,
            "max_concurrent": max_concurrent, "min_volume": min_volume,
-           "windows": [{"window": lbl, **(st or {})} for lbl, st in rows],
-           "positive_windows": pos, "total_windows": n_win}
+           "fetched_days": round((now - fetched_start) / DAY_MS, 1),
+           "windows": [{"window": lbl, "status": note, **(st or {})} for lbl, st, note in rows],
+           "windows_tested": tested, "positive_windows": pos}
     path = os.path.join(os.path.dirname(__file__), "..", "live_backtest_results.json")
     with open(path, "w") as f:
         json.dump(out, f, indent=2, default=str)
