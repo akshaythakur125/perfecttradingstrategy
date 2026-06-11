@@ -51,3 +51,4 @@ github_data_backtest_results.json
 # Live run outputs
 live_signals.json
 live_backtest_results.json
+paper_state.json
